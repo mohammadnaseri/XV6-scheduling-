@@ -6,18 +6,24 @@
 #include "x86.h"
 #include "proc.h"
 #include "spinlock.h"
+#include <time.h>
+
 
 struct {
 	struct spinlock lock;
 	struct proc proc[NPROC];
 } ptable;
 
-
-struct priorityList{
-	struct proc* procPtr[NPROC];
+struct processQueue{
+	struct proc* proc[QUEUE_CAPACITY];
+	int head;
+	int tail;
+	int size;
+	int priority;
 };
 
-struct priorityList priorityLists[PRIORITYLEVELS];
+
+struct processQueue priorityTable[PRIORITYLEVELS] ;
 
 static struct proc *initproc;
 
@@ -251,71 +257,31 @@ int wait(void) {
 void scheduler(void) {
 	struct proc *p;
 
-	struct proc** priorityTable;
-	int priority;
-	int i;
+	int priority = 0;
+
+	//TODO: find the correct place for this
+
+
 	for (;;) {
 		// Enable interrupts on this processor.
 		sti();
-
-
-		for(priority = 0 ; priority< PRIORITYLEVELS ; priority++)
-		{
-			priorityTable = priorityLists[priority].procPtr;
-			while(!IsPriorityTableEmpty(priority))
-			{
-				int j = 0;
-				for( ; j<NPROC ; j++ )
-				{
-					if(priorityTable[j]->state == RUNNABLE
-							&& priorityTable[j]->priority == priority)
-					{
-						proc = priorityTable[j];
-						//SWITCH
-						for(int k = 0 ; k<priority;k++)
-						{
-							if(!IsPriorityTableEmpty(k))
-							{
-								priority = 0;
-								break;
-							}
-						}
-					}
-				}
-				break;
-			}
-		}
-
-		// Loop over process table looking for process to run.
 		acquire(&ptable.lock);
-		for (i = 0, p = ptable.proc; p < &ptable.proc[NPROC]; p++, i++) {
-			if (p->state != RUNNABLE)
+		
+		p = GetNextRunnableProcess(priority);
+		if( p != 0)
+		{
 
-				continue;
-			cprintf("cpu id is :  %d \n",cpu->id);
+			SwitchToProccess(p);
 			ps();
-
-			//cprintf("*************************-----***************** \n");
-			cprintf("!!!!!!!!!!the current process is %s |pid:%d \n", p->name,
-					p->pid);
-
-			// Switch to chosen process.  It is the process's job
-			// to release ptable.lock and then reacquire it
-			// before jumping back to us.
-			proc = p;
-			switchuvm(p);
-			p->state = RUNNING;
-			swtch(&cpu->scheduler, proc->context);
-			switchkvm();
-
-			// Process is done running for now.
-			// It should have changed its p->state before coming back.
-			proc = 0;
+			if(IsThereANoneEmptyHigherLevelPriorityTable(priority))
+				priority= 0; // Start from the highest priority
 		}
+		else// the current priority Table is empty
+			priority = (priority+1)%PRIORITYLEVELS;
 		release(&ptable.lock);
-
 	}
 }
+
 
 // Enter scheduler.  Must hold only ptable.lock
 // and have changed proc->state.
@@ -475,40 +441,203 @@ void printprocesslist(void) {
 }
 
 int ps(void) {
-	static char *states[] = { [UNUSED] "unused", [EMBRYO] "embryo", [SLEEPING
-			] "sleep ", [RUNNABLE] "runble", [RUNNING] "run   ", [ZOMBIE
-			] "zombie" };
+	//static char *states[] = { [UNUSED] "unused", [EMBRYO] "embryo", [SLEEPING
+	//		] "sleep ", [RUNNABLE] "runble", [RUNNING] "run   ", [ZOMBIE
+	//		] "zombie" };
 
-	cprintf("########################################### \n");
-	//cprintf("-----------output of the procdump function is below :----------\n");
-	//procdump();
-	//cprintf("-----------output of pagetable and processes in that : ----------\n");
-	int i = 0;
-	for (; i < NPROC; i++) {
-		if (ptable.proc[i].state != UNUSED) {
-			cprintf("process name : %s |pid:%d | state:%s \n",
-					ptable.proc[i].name, ptable.proc[i].pid,
-					states[ptable.proc[i].state]);
+	cprintf("#############%i################ \n");
+
+	int i;
+	for(i=0;i<5;i++)
+	{
+		if(!IsQueueEmpty(&priorityTable[i]))
+		{
+			int p;
+			for(p=0;p<priorityTable[i].size;p++)
+			{
+				cprintf("process name->%s | process priority->%i \n"
+						,priorityTable[i].proc[p]->name
+						,priorityTable[i].proc[p]->priority);
+
+			}
 		}
-	}
+		else
+		{
+			i=i+1;
+		}
+	 }
+
+
+
 	//cprintf("##########################################");
 	return 0;
+}
+
+void SwitchToProccess(struct proc* process)
+{
+	proc = process;
+	switchuvm(process);
+	process->state = RUNNING;
+	swtch(&cpu->scheduler, proc->context);
+	switchkvm();
+
+	// Process is done running for now.
+	// It should have changed its p->state before coming back.
+	proc = 0;
+}
+
+void InitialPriorityTables()
+{
+	int i;
+	for(i = 0 ; i< PRIORITYLEVELS;i++)
+	{
+		priorityTable[i].head = 0;
+		priorityTable[i].tail = QUEUE_CAPACITY-1;   
+		priorityTable[i].size=0;
+		priorityTable[i].priority = i;
+	}
 }
 
 void SetProcessRunnable(struct proc* process)
 {
 	process->state=RUNNABLE;
-	InsertToPriorityList(process->priority,process);
-
+	InsertToPriorityTable(process->priority,process);
 }
-int InsertToPriorityList(int priority,struct proc* process)
+
+int InsertToPriorityTable(int priority,struct proc* process)
 {
-	for( int i = 0 ; i< NPROC ; i++)
-		if(priorityLists[priority].procPtr[i]->state!=RUNNABLE
-				|| priorityLists[priority].procPtr[i]->priority!= priority)
+	return EnqueueProcess(&priorityTable[priority],process);
+}
+
+
+
+struct proc* GetNextRunnableProcess(int priority)
+{
+	return DequeueProcess(&priorityTable[priority]);
+}
+
+bool IsThereANoneEmptyHigherLevelPriorityTable(int currentPriority)
+{
+	int i;
+	for(i = 0 ; i< currentPriority ; i++)
+	{
+		if(!IsPriorityTableEmpty(i))
+			return true;
+	}
+	return false;
+}
+
+bool IsPriorityTableEmpty(int priority)
+{
+	return (IsQueueEmpty(&priorityTable[priority]));
+}
+
+
+
+/****************************** QUEUE ******************************/
+int EnqueueProcess(struct processQueue* queue, struct proc* process )
+{
+	if(!IsQueueFull(queue))
+	{
+		//queue.proc[queue.tail] = process;
+		//queue.tail = (queue.tail++)%QUEUE_CAPACITY;
+		//return 0;
+		if(queue!=0)
 		{
-			priorityLists[priority].procPtr[i]=process;
+			queue->tail=(queue->tail+1)%QUEUE_CAPACITY;
+			queue->proc[queue->tail]=process;
+			queue->size=(queue->size)+1;
 			return 0;
 		}
+	}
 	return -1;
+}
+
+struct proc* DequeueProcess(struct processQueue* queue)
+{
+	if(!IsQueueEmpty(queue))
+	{
+		struct proc* p = queue->proc[queue->head];
+		queue->head= (queue->head+1)%QUEUE_CAPACITY;
+		queue->size=queue->size-1;
+		return p;
+		
+	}
+	return 0;
+}
+
+bool IsQueueFull(struct processQueue* queue)
+{
+	//return (queue.head == queue.tail);
+	return (queue->size>=QUEUE_CAPACITY);
+		
+}
+
+bool IsQueueEmpty(struct processQueue* queue)
+{
+	//if tail is pointing to the next of head
+	//return ((queue.head++)%QUEUE_CAPACITY == queue.tail);
+	return (queue->size<=0);
+	
+}
+
+/****************************** /QUEUE ******************************/
+
+int setpriority(int pid,int priority)
+{
+	if(findprocesswithpid(pid)!=0)
+	{
+		findprocesswithpid(pid)->priority=priority;
+		setpriorityforchildren(pid,priority);
+		return 0;
+	}
+	else
+		return -1;
+}
+
+struct proc* findprocesswithpid(int pid)
+{
+	int i;
+	int j;
+	struct proc* foundprocess;
+	for (i=0;i<PRIORITYLEVELS;i++)
+	{
+		for(j=0;j<priorityTable[i].size;j++)
+		{
+			if(priorityTable[i].proc[j]->pid==pid)
+			{
+				foundprocess=priorityTable[i].proc[j];
+			}
+			else
+			{
+				foundprocess=nullp;
+			}
+		}
+	}
+	return foundprocess;
+}
+
+void setpriorityforchildren(int parentpid,int priority)
+{
+	int i;
+	int j;
+	struct proc* childprocess;
+	for (i=0;i<PRIORITYLEVELS;i++)
+	{
+		for(j=0;j<priorityTable[i].size;j++)
+		{
+			if(priorityTable[i].proc[j]->parent->pid==parentpid)
+			{
+				childprocess=priorityTable[i].proc[j];
+				childprocess->priority=priority;
+				setpriorityforchildren(childprocess->pid,priority);
+
+			}
+			else
+			{
+				childprocess=nullp;
+			}
+		}
+	}
+
 }
